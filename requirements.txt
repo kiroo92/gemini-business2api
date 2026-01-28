@@ -16,3 +16,4 @@ selenium>=4.15.0
 # Optional: PostgreSQL database support for environments without persistent storage
 # Uncomment the line below and set DATABASE_URL environment variable if needed
 asyncpg>=0.29.0
+curl_cffi
