@@ -224,7 +224,7 @@ class GeminiAutomation:
 
         # Step 5: 轮询邮件获取验证码（传入发送时间)
         self._log("info", "📬 开始轮询邮箱获取验证码...")
-        code = mail_client.poll_for_code(timeout=40, interval=4, since_time=send_time)
+        code = mail_client.poll_for_code(timeout=20, interval=2, since_time=send_time)
 
         if not code:
             self._log("warning", "⚠️ 验证码获取超时，尝试重新发送...")
@@ -234,7 +234,7 @@ class GeminiAutomation:
             if self._click_resend_code_button(page):
                 self._log("info", "🔄 已点击重新发送按钮，等待新验证码...")
                 # 再次轮询验证码
-                code = mail_client.poll_for_code(timeout=40, interval=4, since_time=send_time)
+                code = mail_client.poll_for_code(timeout=20, interval=2, since_time=send_time)
                 if not code:
                     self._log("error", "❌ 重新发送后仍未收到验证码")
                     self._save_screenshot(page, "code_timeout_after_resend")

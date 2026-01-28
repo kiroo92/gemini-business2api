@@ -1,6 +1,8 @@
 services:
   gemini-api:
-    image: cooooookk/gemini-business2api:latest
+    build:
+      context: .
+      dockerfile: Dockerfile
     container_name: gemini-business2api
     ports:
       - "7860:7860"
