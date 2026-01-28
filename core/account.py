@@ -747,7 +747,12 @@ def delete_account(
     if len(filtered) == len(accounts_data):
         raise ValueError(f"账户 {account_id} 不存在")
 
-    save_accounts_to_file(filtered)
+    # 优先使用数据库直接删除
+    if storage.is_database_enabled():
+        storage.delete_account_sync(account_id)
+    else:
+        save_accounts_to_file(filtered)
+
     return reload_accounts(
         multi_account_mgr,
         http_client,
@@ -858,7 +863,12 @@ def bulk_delete_accounts(
         errors.append(f"{account_id}: 账户不存在")
 
     if deleted_ids:
-        save_accounts_to_file(kept)
+        # 优先使用数据库直接删除
+        if storage.is_database_enabled():
+            storage.delete_accounts_sync(deleted_ids)
+        else:
+            save_accounts_to_file(kept)
+
         multi_account_mgr = reload_accounts(
             multi_account_mgr,
             http_client,
