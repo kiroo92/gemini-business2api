@@ -543,6 +543,14 @@
               min="1"
               class="w-full rounded-2xl border border-input bg-background px-3 py-2 text-sm"
             />
+            <label class="block text-xs text-muted-foreground">并发数（1-5）</label>
+            <input
+              v-model.number="registerConcurrency"
+              type="number"
+              min="1"
+              max="5"
+              class="w-full rounded-2xl border border-input bg-background px-3 py-2 text-sm"
+            />
           </div>
 
           <div v-else class="space-y-4">
@@ -1006,6 +1014,7 @@ const configJson = ref('')
 const configMasked = ref(false)
 const configData = ref<AccountConfigItem[]>([])
 const registerCount = ref(1)
+const registerConcurrency = ref(1)
 const selectedMailProvider = ref(settings.value?.basic?.temp_mail_provider || defaultMailProvider)
 const isRegisterOpen = ref(false)
 const addMode = ref<'register' | 'import'>('register')
@@ -2395,7 +2404,10 @@ const handleRegister = async () => {
     const count = Number.isFinite(registerCount.value) && registerCount.value > 0
       ? registerCount.value
       : undefined
-    const task = await accountsApi.startRegister(count, undefined, selectedMailProvider.value)
+    const concurrency = Number.isFinite(registerConcurrency.value) && registerConcurrency.value > 0
+      ? Math.min(5, Math.max(1, registerConcurrency.value))
+      : undefined
+    const task = await accountsApi.startRegister(count, undefined, selectedMailProvider.value, concurrency)
     syncRegisterTask(task)
     startRegisterPolling(task.id)
     isRegisterOpen.value = false

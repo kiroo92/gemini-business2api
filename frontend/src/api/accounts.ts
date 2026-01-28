@@ -52,8 +52,8 @@ export const accountsApi = {
       accountIds
     ),
 
-  startRegister: (count?: number, domain?: string, mail_provider?: string) =>
-    apiClient.post<never, RegisterTask>('/admin/register/start', { count, domain, mail_provider }),
+  startRegister: (count?: number, domain?: string, mail_provider?: string, concurrency?: number) =>
+    apiClient.post<never, RegisterTask>('/admin/register/start', { count, domain, mail_provider, concurrency }),
 
   getRegisterTask: (taskId: string) =>
     apiClient.get<never, RegisterTask>(`/admin/register/task/${taskId}`),

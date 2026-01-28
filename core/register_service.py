@@ -20,6 +20,7 @@ logger = logging.getLogger("gemini.register")
 class RegisterTask(BaseTask):
     """注册任务数据类"""
     count: int = 0
+    concurrency: int = 1
     domain: Optional[str] = None
     mail_provider: Optional[str] = None
 
@@ -27,6 +28,7 @@ class RegisterTask(BaseTask):
         """转换为字典"""
         base_dict = super().to_dict()
         base_dict["count"] = self.count
+        base_dict["concurrency"] = self.concurrency
         base_dict["domain"] = self.domain
         base_dict["mail_provider"] = self.mail_provider
         return base_dict
@@ -58,12 +60,11 @@ class RegisterService(BaseTaskService[RegisterTask]):
             log_prefix="REGISTER",
         )
 
-    async def start_register(self, count: Optional[int] = None, domain: Optional[str] = None, mail_provider: Optional[str] = None) -> RegisterTask:
-        """启动注册任务（支持排队）。"""
+    async def start_register(self, count: Optional[int] = None, domain: Optional[str] = None, mail_provider: Optional[str] = None, concurrency: Optional[int] = None) -> RegisterTask:
+        """启动注册任务（支持排队和并发）。"""
         async with self._lock:
             if os.environ.get("ACCOUNTS_CONFIG"):
                 raise ValueError("ACCOUNTS_CONFIG is set; register is disabled")
-                raise ValueError("已设置 ACCOUNTS_CONFIG 环境变量，注册功能已禁用")
             if self._current_task_id:
                 current = self._tasks.get(self._current_task_id)
                 if current and current.status == TaskStatus.RUNNING:
@@ -84,23 +85,86 @@ class RegisterService(BaseTaskService[RegisterTask]):
 
             register_count = count or config.basic.register_default_count
             register_count = max(1, int(register_count))
-            task = RegisterTask(id=str(uuid.uuid4()), count=register_count, domain=domain_value, mail_provider=mail_provider_value)
+
+            # 确定并发数（限制在 1-5 之间）
+            register_concurrency = concurrency or config.basic.register_concurrency
+            register_concurrency = max(1, min(5, int(register_concurrency)))
+            # 并发数不能超过注册数量
+            register_concurrency = min(register_concurrency, register_count)
+
+            task = RegisterTask(
+                id=str(uuid.uuid4()),
+                count=register_count,
+                concurrency=register_concurrency,
+                domain=domain_value,
+                mail_provider=mail_provider_value
+            )
             self._tasks[task.id] = task
             # 将 domain 和 mail_provider 记录在日志里，便于排查
-            self._append_log(task, "info", f"register task queued (count={register_count}, domain={domain_value or 'default'}, provider={mail_provider_value})")
+            self._append_log(task, "info", f"register task queued (count={register_count}, concurrency={register_concurrency}, domain={domain_value or 'default'}, provider={mail_provider_value})")
             await self._enqueue_task(task)
-            self._append_log(task, "info", f"📝 创建注册任务 (数量={register_count})")
+            self._append_log(task, "info", f"📝 创建注册任务 (数量={register_count}, 并发={register_concurrency})")
             return task
 
     def _execute_task(self, task: RegisterTask):
         return self._run_register_async(task, task.domain, task.mail_provider)
 
     async def _run_register_async(self, task: RegisterTask, domain: Optional[str], mail_provider: Optional[str]) -> None:
-        """异步执行注册任务（支持取消）。"""
+        """异步执行注册任务（支持并发和取消）。"""
         loop = asyncio.get_running_loop()
-        self._append_log(task, "info", f"🚀 注册任务已启动 (共 {task.count} 个账号)")
+        concurrency = task.concurrency
+        self._append_log(task, "info", f"🚀 注册任务已启动 (共 {task.count} 个账号, 并发数={concurrency})")
 
-        for idx in range(task.count):
+        # 动态调整线程池大小以支持并发
+        if concurrency > 1:
+            self._executor._max_workers = concurrency
+
+        semaphore = asyncio.Semaphore(concurrency)
+        results_lock = asyncio.Lock()
+
+        async def register_with_semaphore(idx: int) -> dict:
+            """带信号量控制的单个注册任务"""
+            async with semaphore:
+                if task.cancel_requested:
+                    return {"success": False, "error": "cancelled", "worker_id": idx + 1}
+
+                worker_id = idx + 1
+                try:
+                    self._append_log(task, "info", f"[Worker-{worker_id}] 📊 开始注册第 {idx + 1}/{task.count} 个账号")
+                    result = await loop.run_in_executor(
+                        self._executor,
+                        self._register_one,
+                        domain, mail_provider, task, worker_id
+                    )
+                    result["worker_id"] = worker_id
+                    return result
+                except TaskCancelledError:
+                    return {"success": False, "error": "cancelled", "worker_id": worker_id}
+                except Exception as exc:
+                    return {"success": False, "error": str(exc), "worker_id": worker_id}
+
+        async def process_result(result: dict):
+            """处理单个注册结果"""
+            async with results_lock:
+                task.progress += 1
+                task.results.append(result)
+                worker_id = result.get("worker_id", "?")
+
+                if result.get("success"):
+                    task.success_count += 1
+                    email = result.get('email', '未知')
+                    self._append_log(task, "info", f"[Worker-{worker_id}] ✅ 注册成功: {email}")
+                else:
+                    task.fail_count += 1
+                    error = result.get('error', '未知错误')
+                    if error != "cancelled":
+                        self._append_log(task, "error", f"[Worker-{worker_id}] ❌ 注册失败: {error}")
+
+        # 创建所有注册任务
+        register_tasks = [register_with_semaphore(i) for i in range(task.count)]
+
+        # 使用 as_completed 实时处理结果
+        for coro in asyncio.as_completed(register_tasks):
             if task.cancel_requested:
                 self._append_log(task, "warning", f"register task cancelled: {task.cancel_reason or 'cancelled'}")
                 task.status = TaskStatus.CANCELLED
@@ -108,25 +172,10 @@ class RegisterService(BaseTaskService[RegisterTask]):
                 return
 
             try:
-                self._append_log(task, "info", f"📊 进度: {idx + 1}/{task.count}")
-                result = await loop.run_in_executor(self._executor, self._register_one, domain, mail_provider, task)
-            except TaskCancelledError:
-                task.status = TaskStatus.CANCELLED
-                task.finished_at = time.time()
-                return
+                result = await coro
+                await process_result(result)
             except Exception as exc:
-                result = {"success": False, "error": str(exc)}
-            task.progress += 1
-            task.results.append(result)
-
-            if result.get("success"):
-                task.success_count += 1
-                email = result.get('email', '未知')
-                self._append_log(task, "info", f"✅ 注册成功: {email}")
-            else:
-                task.fail_count += 1
-                error = result.get('error', '未知错误')
-                self._append_log(task, "error", f"❌ 注册失败: {error}")
+                await process_result({"success": False, "error": str(exc), "worker_id": "?"})
 
         if task.cancel_requested:
             task.status = TaskStatus.CANCELLED
@@ -136,9 +185,10 @@ class RegisterService(BaseTaskService[RegisterTask]):
         self._current_task_id = None
         self._append_log(task, "info", f"🏁 注册任务完成 (成功: {task.success_count}, 失败: {task.fail_count}, 总计: {task.count})")
 
-    def _register_one(self, domain: Optional[str], mail_provider: Optional[str], task: RegisterTask) -> dict:
+    def _register_one(self, domain: Optional[str], mail_provider: Optional[str], task: RegisterTask, worker_id: int = 1) -> dict:
         """注册单个账户"""
-        log_cb = lambda level, message: self._append_log(task, level, message)
+        worker_prefix = f"[Worker-{worker_id}] " if task.concurrency > 1 else ""
+        log_cb = lambda level, message: self._append_log(task, level, f"{worker_prefix}{message}")
 
         log_cb("info", "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
         log_cb("info", "🆕 开始注册新账户")
